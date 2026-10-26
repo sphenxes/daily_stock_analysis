@@ -17,6 +17,7 @@ A股自选股智能分析系统 - 通知层
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -89,6 +90,30 @@ from src.notification_sender import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+_FORK_LONG_FLOAT = re.compile(r"(?<![\w.:])-?\d+\.\d{5,}(?![\d.])")
+
+
+def _fork_round_long_decimals(text):
+    """Fork patch: 12.731999969482422 -> 12.73 in report text (5+ decimals only; clock times untouched)."""
+    if not isinstance(text, str):
+        return text
+    return _FORK_LONG_FLOAT.sub(lambda m: f"{float(m.group(0)):.2f}", text)
+
+
+def _score_disp(result) -> str:
+    """Fork patch: capped score plus the AI's raw score when a guardrail changed it, e.g. "59 (AI 72)"."""
+    score = getattr(result, "sentiment_score", None)
+    dash = getattr(result, "dashboard", None)
+    cal = dash.get("decision_score_calibration") if isinstance(dash, dict) else None
+    raw = cal.get("raw_score") if isinstance(cal, dict) else None
+    try:
+        if raw is not None and score is not None and int(raw) != int(score):
+            return f"{score} (AI {int(raw)})"
+    except (TypeError, ValueError):
+        pass
+    return f"{score}"
 
 
 def _safe_float(value: Any) -> Optional[float]:
@@ -961,7 +986,7 @@ class NotificationService(
                 report_lines.append(
                     f"{emoji} **{self._get_display_name(r, report_language)}({r.code})**: "
                     f"{signal_text} | "
-                    f"{labels['score_label']} {r.sentiment_score} | "
+                    f"{labels['score_label']} {_score_disp(r)} | "
                     f"{localize_trend_prediction(r.trend_prediction, report_language)}"
                 )
                 news_disclosure = self._empty_news_disclosure(r, report_language)
@@ -978,7 +1003,7 @@ class NotificationService(
                     f"### {emoji} {self._get_display_name(result, report_language)} ({result.code})",
                     "",
                     f"**{labels['action_advice_label']}：{signal_text}** | "
-                    f"**{labels['score_label']}：{result.sentiment_score}** | "
+                    f"**{labels['score_label']}：{_score_disp(result)}** | "
                     f"**{labels['trend_label']}：{localize_trend_prediction(result.trend_prediction, report_language)}** | "
                     f"**Confidence：{confidence_stars}**",
                     "",
@@ -1329,7 +1354,7 @@ class NotificationService(
                 report_lines.append(
                     f"{signal_emoji} **{display_name}({r.code})**: "
                     f"{signal_text} | "
-                    f"{labels['score_label']} {r.sentiment_score} | "
+                    f"{labels['score_label']} {_score_disp(r)} | "
                     f"{localize_trend_prediction(r.trend_prediction, report_language)}"
                 )
                 if self._report_summary_only:
@@ -1673,7 +1698,7 @@ class NotificationService(
                 lines.append(
                     f"{signal_emoji} **{stock_name}({r.code})**: "
                     f"{signal_text} | "
-                    f"{labels['score_label']} {r.sentiment_score} | "
+                    f"{labels['score_label']} {_score_disp(r)} | "
                     f"{localize_trend_prediction(r.trend_prediction, report_language)}"
                 )
                 news_disclosure = self._empty_news_disclosure(r, report_language)
@@ -1853,7 +1878,7 @@ class NotificationService(
             lines.append(f"### {emoji} {self._get_display_name(result, report_language)}({result.code})")
             lines.append(
                 f"**{signal_text}** | "
-                f"{labels['score_label']}:{result.sentiment_score} | "
+                f"{labels['score_label']}:{_score_disp(result)} | "
                 f"{localize_trend_prediction(result.trend_prediction, report_language)}"
             )
             news_disclosure = self._empty_news_disclosure(result, report_language)
@@ -1942,7 +1967,7 @@ class NotificationService(
             lines.append(
                 f"**{name}({r.code})** {emoji} "
                 f"{signal_text} | "
-                f"{labels['score_label']} {r.sentiment_score} | {one}"
+                f"{labels['score_label']} {_score_disp(r)} | {one}"
             )
             news_disclosure = self._empty_news_disclosure(r, report_language)
             if news_disclosure:
@@ -1983,7 +2008,7 @@ class NotificationService(
         lines = [
             f"## {signal_emoji} {stock_name} ({result.code})",
             "",
-            f"> {report_date} | {labels['score_label']}: **{result.sentiment_score}** | {localize_trend_prediction(result.trend_prediction, report_language)}",
+            f"> {report_date} | {labels['score_label']}: **{_score_disp(result)}** | {localize_trend_prediction(result.trend_prediction, report_language)}",
             "",
         ]
 
@@ -2904,6 +2929,7 @@ class NotificationService(
         Returns:
             保存的文件路径
         """
+        content = _fork_round_long_decimals(content)  # fork patch: 5+ decimals -> 2
         from pathlib import Path
 
         if filename is None:
@@ -3019,7 +3045,7 @@ class NotificationBuilder:
             name = get_localized_stock_name(r.name, r.code, report_language)
             lines.append(
                 f"{emoji} {name}({r.code}): {display_advice} | "
-                f"{labels['score_label']} {r.sentiment_score}"
+                f"{labels['score_label']} {_score_disp(r)}"
             )
 
         return "\n".join(lines)

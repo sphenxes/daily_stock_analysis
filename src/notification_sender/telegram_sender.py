@@ -19,6 +19,16 @@ from src.formatters import _custom_unit_to_index, strip_hidden_markdown_metadata
 logger = logging.getLogger(__name__)
 
 
+_FORK_LONG_FLOAT = re.compile(r"(?<![\w.:])-?\d+\.\d{5,}(?![\d.])")
+
+
+def _fork_round_long_decimals(text):
+    """Fork patch: 12.731999969482422 -> 12.73 in report text (5+ decimals only; clock times untouched)."""
+    if not isinstance(text, str):
+        return text
+    return _FORK_LONG_FLOAT.sub(lambda m: f"{float(m.group(0)):.2f}", text)
+
+
 class TelegramSender:
 
     def __init__(self, config: Config):
@@ -63,6 +73,7 @@ class TelegramSender:
         Returns:
             是否发送成功
         """
+        content = _fork_round_long_decimals(content)  # fork patch: 5+ decimals -> 2
         target_chat_id = chat_id if chat_id is not None else self._telegram_config.get("chat_id")
         target_message_thread_id = (
             message_thread_id

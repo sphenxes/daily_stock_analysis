@@ -12,6 +12,7 @@ A股自选股智能分析系统 - 搜索服务模块
 """
 
 import logging
+import os
 import multiprocessing
 import re
 import threading
@@ -2241,6 +2242,79 @@ class SearXNGSearchProvider(BaseSearchProvider):
         )
 
 
+class YahooFinanceNewsProvider(BaseSearchProvider):
+    """Yahoo Finance per-ticker headlines (RSS feed, free, no API key).
+
+    Fork addition (sphenxes, 2026-10-25). Yahoo's feed is keyed by TICKER, not by a free-text query,
+    so it only answers when the caller passes ``stock_code`` (search_stock_news and the latest_news
+    dimension of search_comprehensive_intel); any other query returns an empty, successful response.
+    yfinance's own Ticker.news returned 0 items for every ticker on 2026-10-25, the RSS feed did not.
+    Enabled with YAHOO_NEWS_ENABLED=true.
+    """
+
+    FEED = "https://feeds.finance.yahoo.com/rss/2.0/headline"
+
+    def __init__(self):
+        super().__init__(["no-key"], "Yahoo Finance")
+
+    @staticmethod
+    def to_yahoo_symbol(stock_code: str) -> Optional[str]:
+        code = (stock_code or "").strip().upper()
+        if not code:
+            return None
+        m = re.fullmatch(r"(?:HK)?0*(\d{1,5})(?:\.HK)?", code)
+        if m and (code.startswith("HK") or code.endswith(".HK") or len(code) == 5):
+            return f"{int(m.group(1)):04d}.HK"
+        if re.fullmatch(r"\d{6}", code):        # A-share: Yahoo has no useful feed
+            return None
+        if code.endswith(".US"):
+            code = code[:-3]
+        return code
+
+    def search(self, query: str, max_results: int = 5, days: int = 7, stock_code: Optional[str] = None) -> SearchResponse:
+        symbol = self.to_yahoo_symbol(stock_code) if stock_code else None
+        if not symbol:
+            return SearchResponse(query=query, results=[], provider=self.name, success=True)
+        return self._execute_search(symbol, max_results=max_results, days=days)
+
+    def _do_search(self, query: str, api_key: str, max_results: int, days: int = 7) -> SearchResponse:
+        import xml.etree.ElementTree as ET
+        started = time.time()
+        try:
+            r = requests.get(self.FEED, params={"s": query, "region": "US", "lang": "en-US"},
+                             headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+            r.raise_for_status()
+            root = ET.fromstring(r.content)
+        except Exception as exc:
+            return SearchResponse(query=query, results=[], provider=self.name, success=False,
+                                  error_message=f"Yahoo RSS: {exc}", search_time=time.time() - started)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, days))
+        results: List[SearchResult] = []
+        for item in root.iter("item"):
+            title = (item.findtext("title") or "").strip()
+            link = (item.findtext("link") or "").strip()
+            pub = item.findtext("pubDate")
+            try:
+                pub_dt = parsedate_to_datetime(pub) if pub else None
+            except (TypeError, ValueError):
+                pub_dt = None
+            if pub_dt is not None and pub_dt.tzinfo and pub_dt < cutoff:
+                continue
+            if not title:
+                continue
+            results.append(SearchResult(
+                title=title,
+                snippet=(item.findtext("description") or "").strip(),
+                url=link,
+                source=(urlparse(link).hostname or "finance.yahoo.com").removeprefix("www."),
+                published_date=pub_dt.date().isoformat() if pub_dt else None,
+            ))
+            if len(results) >= max_results:
+                break
+        return SearchResponse(query=f"Yahoo Finance news {query}", results=results, provider=self.name,
+                              success=True, search_time=time.time() - started)
+
+
 class SearchService:
     """
     搜索服务
@@ -2505,6 +2579,11 @@ class SearchService:
             self._providers.insert(0, AnspireSearchProvider(anspire_keys))
             logger.info(f"已配置 Anspire Search 搜索，共 {len(anspire_keys)} 个 API Key")
             
+        # Fork addition: Yahoo Finance per-ticker RSS (free, no key), tried first
+        if os.getenv("YAHOO_NEWS_ENABLED", "").strip().lower() in ("1", "true", "yes"):
+            self._providers.insert(0, YahooFinanceNewsProvider())
+            logger.info("Yahoo Finance news enabled (RSS, no key)")
+
         if not self._providers:
             logger.warning("未配置任何搜索能力，新闻搜索功能将不可用")
 
@@ -4138,7 +4217,9 @@ class SearchService:
                     continue
 
                 search_kwargs: Dict[str, Any] = {}
-                if isinstance(provider, TavilySearchProvider):
+                if isinstance(provider, YahooFinanceNewsProvider):
+                    search_kwargs["stock_code"] = stock_code
+                elif isinstance(provider, TavilySearchProvider):
                     search_kwargs["topic"] = "news"
                 elif isinstance(provider, BraveSearchProvider):
                     search_kwargs.update(
@@ -4568,7 +4649,14 @@ class SearchService:
                 request_days,
             )
 
-            if isinstance(provider, TavilySearchProvider) and dim.get('tavily_topic'):
+            if isinstance(provider, YahooFinanceNewsProvider):
+                response = provider.search(
+                    dim['query'],
+                    max_results=provider_max_results,
+                    days=request_days,
+                    stock_code=stock_code if dim['name'] == 'latest_news' else None,
+                )
+            elif isinstance(provider, TavilySearchProvider) and dim.get('tavily_topic'):
                 response = provider.search(
                     dim['query'],
                     max_results=provider_max_results,
