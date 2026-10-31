@@ -100,6 +100,8 @@ _AUTO_THINKING_MODELS: List[str] = ["deepseek-reasoner", "deepseek-r1", "qwq"]
 # Models that need explicit opt-in via extra_body; payload decoupled from model name.
 _OPT_IN_THINKING_MODELS: Dict[str, dict] = {
     "deepseek-chat": {"thinking": {"type": "enabled"}},
+    # Hesham 2026-10-31: OpenRouter v4-flash reasons by default -> force it OFF (cost, empty answers)
+    "deepseek-v4-flash": {"reasoning": {"enabled": False}},
 }
 
 # Custom model pricing for models not in LiteLLM's built-in price list.
